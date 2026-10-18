@@ -1,0 +1,12 @@
+{
+  "name": "personalscience",
+  "owner": { "name": "Personal Science" },
+  "plugins": [
+    {
+      "name": "straplog-skills",
+      "source": "./",
+      "description": "Polar H10 HRV analysis for StrapLog exports: sessions, overnight, ramp tests, resting HRV",
+      "version": "1.0.0"
+    }
+  ]
+}
