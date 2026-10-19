@@ -501,9 +501,10 @@ def _hae_daily(rows: list[dict], day) -> float | None:
 
 
 def _hae_aggregate(agg_resp: dict, strip_end: datetime) -> dict | None:
-    """Apple's per-night totals. The per-epoch feed often stops before the
-    final wake (261016, 261017, 261018), so TST for the Sleep.md row comes
-    from here; the epochs still drive the awake-window reconciliation."""
+    """Apple's per-night totals. TST for the Sleep.md row comes from here; the
+    epochs drive the awake-window reconciliation. (The per-epoch feed used to
+    stop before the final wake on 261016-261018; that was the fetch window,
+    see fetch_health().)"""
     nights = [r for r in _hae_metrics(agg_resp).get("sleep_analysis", [])
               if r.get("sleepEnd")]
     if not nights:
@@ -621,7 +622,12 @@ def fetch_health(strip_start: datetime, strip_end: datetime, out_dir: Path) -> P
     day1 = b.strftime("%Y-%m-%d 23:59:59 %z")
 
     hae = HaeClient(*hae_config())
-    sleep = hae.call("get_health_metrics", start=fmt(lo), end=fmt(hi),
+    # Health Auto Export silently drops epochs that START in roughly the last
+    # 6 h of the requested window (261019: end 06:45 -> feed stopped at 00:56;
+    # end 05:00 -> 23:08; end 12:00 -> full night to 04:06). This was the
+    # "per-epoch feed stops before final wake" seen 261016-261018. Over-request
+    # by 10 h; health_pull() trims to the strip's own overlap window.
+    sleep = hae.call("get_health_metrics", start=fmt(lo), end=fmt(hi + timedelta(hours=10)),
                      metrics="sleep_analysis", aggregate=False)
     daily = hae.call("get_health_metrics", start=day0, end=day1, interval="days",
                      metrics="resting_heart_rate,respiratory_rate,blood_oxygen_saturation,"
