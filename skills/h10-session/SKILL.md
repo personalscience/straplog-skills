@@ -46,13 +46,15 @@ ${CLAUDE_SKILL_DIR}/scripts/analyze_h10.py \
   --mode strength --sets workout.txt --rest-marker
 ```
 
-Useful flags: `--hrmax` / `--hrrest` (default **182 / 57**, Richard's audited anchors), `--warmup N` (minutes excluded from drift, default 15), `--band LO-HI` (repeatable target band), `--utc-offset` (default `-7` = PDT; use `-8` in winter), `--prominence` / `--min-gap` for peak sensitivity.
+Useful flags: `--start HH:MM` (skip a noisy lead-in), `--hrmax` / `--hrrest` (default **182 / 57**, Richard's audited anchors), `--warmup N` (minutes excluded from drift, default 15), `--band LO-HI` (repeatable target band), `--utc-offset` (default `-7` = PDT; use `-8` in winter), `--prominence` / `--min-gap` for peak sensitivity.
 
 **Bands default to the corrected table: Z2 `120-145`, Z3 `145-158`.** If a note or an older command line says `115-135` / `136-150`, that is stale — do not copy it. Why: `reference/history.md`.
 
 Outputs to `--out`: `summary.md`, `summary.json` (everything, including the full set list), `session.png`, `hr_alpha1.png`, `hr_1hz.csv`, `windowed_features.csv`. A slim JSON goes to stdout. **Parse that first**, and read the JSON *or* `summary.md`, never both (~80% redundant). With diamonds, stdout has `stations` and `n_sets` but not the peak list. The two zone blocks use different units: `zones` is **seconds**, `alpha1_zones` counts **2-min windows**. Don't load the PNGs unless you need to look at the curve.
 
 **A one-sample HR peak is an artifact, not a max effort.** Quote `hr_max_held_10s` (the highest HR held for 10 s), not `hr_max`. A big gap between them means a spike. No need to grep `hr_1hz.csv`. Cases: `reference/history.md`.
+
+**Check `noisy_spans` before anything else.** Each span is a run of minutes where the strap lost contact (usually dry electrodes at the start): beats keep arriving and `coverage` stays at 1.0, but more than 10% are artifacts and the rest are not trustworthy either. HR, zones, drift and α1 inside a span are not real; `hr_min`/`hr_max` usually come from one. Re-run with `--start HH:MM` (local clock, from just after the last lead-in span) to analyze only the clean part; `trimmed` records the cut, and `--warmup` then counts from the new start. Quote `rr_quality.rmssd_clean_ms` (pairs of kept beats, comparable to the StrapLog app), not the raw `rmssd_ms` that drives the α1 flag.
 
 ### 3. Companion tracks — always pass one if it exists
 

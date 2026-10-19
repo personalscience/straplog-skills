@@ -142,16 +142,64 @@ def load_recording(db_path: Path, pk: int):
 
 # ---------- per-beat + windowed series ------------------------------------
 
-def beat_series(rr_df: pd.DataFrame, pct_thresh: float) -> tuple[pd.DataFrame, float]:
+def beat_series(rr_df: pd.DataFrame, pct_thresh: float) -> tuple[pd.DataFrame, np.ndarray]:
     """Whole-recording cleaned beat series -> instantaneous HR on a 1 Hz grid,
-    plus the fraction of beats the artifact filter dropped. Same filter as the
-    windowed features, so both agree on which beats are artifacts."""
+    plus the per-beat keep mask. Same filter as the windowed features, so both
+    agree on which beats are artifacts."""
     rr = rr_df["rr_ms"].to_numpy(dtype=float)
     t = rr_df["t_rel"].to_numpy()
     keep = hrv.artifact_mask(rr, pct_thresh)
     grid = np.arange(0, float(t.max()) + 1, 1.0)
     hr_1hz = np.interp(grid, t[keep], 60000.0 / rr[keep])
-    return pd.DataFrame({"t": grid, "hr": hr_1hz}), float(1.0 - keep.mean())
+    return pd.DataFrame({"t": grid, "hr": hr_1hz}), keep
+
+
+NOISY_MINUTE_FRAC = 0.10   # clean minutes run 0-4 % dropped; contact loss 15-50 %
+
+
+def noisy_spans(rr_df: pd.DataFrame, keep: np.ndarray, start_local) -> list[dict]:
+    """Stretches where the strap lost contact: whole minutes in which the
+    artifact filter dropped more than NOISY_MINUTE_FRAC of the beats, merged
+    into runs. Beats keep arriving (coverage stays ~1.0), but in a long noisy
+    run the 5-beat median filter has no clean neighbours to judge against, so
+    junk survives into HR, zones and alpha1. Nothing inside a span is
+    trustworthy; `--start` skips a bad lead-in."""
+    minute = (rr_df["t_rel"].to_numpy() // 60).astype(int)
+    frac = pd.Series(~keep).groupby(minute).mean()
+    spans: list[dict] = []
+    for m, f in frac.items():
+        if f <= NOISY_MINUTE_FRAC:
+            continue
+        if spans and spans[-1]["_to"] == m - 1:
+            spans[-1]["_to"] = m
+            spans[-1]["_fr"].append(f)
+        else:
+            spans.append({"_from": m, "_to": m, "_fr": [f]})
+    return [{"from": clock(start_local, sp["_from"] * 60),
+             "to": clock(start_local, (sp["_to"] + 1) * 60),
+             "minutes": sp["_to"] - sp["_from"] + 1,
+             "artifact_pct": round(100 * float(np.mean(sp["_fr"])), 1)}
+            for sp in spans]
+
+
+def trim_start(rr_df: pd.DataFrame, ev_df: pd.DataFrame, start_local,
+               hhmm: str):
+    """Drop everything before local clock time `hhmm` (HH:MM[:SS]) and
+    re-zero the clocks there, so every downstream stat sees only the kept
+    part. Markers before the cut are dropped."""
+    t0 = pd.Timestamp(start_local)
+    cut = pd.Timestamp(f"{t0.date()} {hhmm}")
+    if cut < t0 - pd.Timedelta(hours=12):      # recording crossed midnight
+        cut += pd.Timedelta(days=1)
+    skip = (cut - t0).total_seconds()
+    if not 0 < skip < float(rr_df["t_rel"].max()) - 60:
+        raise SystemExit(f"--start {hhmm} is outside the recording "
+                         f"({t0:%H:%M:%S} + {rr_df['t_rel'].max() / 60:.0f} min).")
+    rr_df = rr_df[rr_df["t_rel"] >= skip].copy()
+    rr_df["t_rel"] -= skip
+    ev_df = ev_df[ev_df["t_rel"] >= skip].copy()
+    ev_df["t_rel"] -= skip
+    return rr_df.reset_index(drop=True), ev_df.reset_index(drop=True), cut, skip
 
 
 # ---------- zones ---------------------------------------------------------
@@ -165,7 +213,7 @@ def zone_breakdown(hr_1hz: pd.DataFrame, hr_max: float, hr_rest: float) -> dict:
     return out
 
 
-def rr_quality(rr_df: pd.DataFrame, hr_mean: float) -> dict:
+def rr_quality(rr_df: pd.DataFrame, hr_mean: float, keep: np.ndarray) -> dict:
     """Decide whether DFA α1 is trustworthy for this recording.
 
     Two failure modes push α1 in OPPOSITE directions, so a bad α1 is not
@@ -196,6 +244,10 @@ def rr_quality(rr_df: pd.DataFrame, hr_mean: float) -> dict:
     d = np.abs(np.diff(v))
     med_drr = float(np.median(d)) if d.size else np.nan
     rmssd = float(np.sqrt((d ** 2).mean())) if d.size else np.nan
+    # Successive differences between beats the filter kept, both of a pair:
+    # comparable to the app's RMSSD. The raw one above drives the flag.
+    both = keep[:-1] & keep[1:]
+    rmssd_clean = float(np.sqrt((d[both] ** 2).mean())) if both.any() else np.nan
 
     # |ΔRR| binned by the instantaneous HR of the *preceding* beat
     hr_inst = 60000.0 / v[:-1] if v.size > 1 else np.array([])
@@ -238,6 +290,7 @@ def rr_quality(rr_df: pd.DataFrame, hr_mean: float) -> dict:
     return {
         "median_abs_drr_ms": round(med_drr, 2),
         "rmssd_ms": round(rmssd, 1),
+        "rmssd_clean_ms": round(rmssd_clean, 1),
         "median_abs_drr_by_hr_band": bins,
         "variability_tracks_intensity": slope_ok,
         "alpha1_trustworthy": not flags,
@@ -925,12 +978,25 @@ def write_summary(out_dir: Path, s: dict) -> None:
         f"- **Beats**: {s['n_beats']:,} · artifacts removed "
         f"{s['artifact_pct']:.2f}% · coverage {s['coverage']:.3f}",
         f"- **HR**: mean {s['hr_mean']:.1f} · median {s['hr_median']:.1f} · "
-        f"peak {s['hr_max']:.0f} · min {s['hr_min']:.0f} bpm",
+        f"peak {s['hr_max']:.0f} (held 10 s {s['hr_max_held_10s']:.0f}) · "
+        f"min {s['hr_min']:.0f} (held 10 s {s['hr_min_held_10s']:.0f}) bpm",
         f"- **Anchors used**: HRmax {s['hrmax_stated']} · "
         f"HRrest {s['hrrest_stated']} (Karvonen)",
         "",
     ]
 
+    if s.get("trimmed"):
+        t = s["trimmed"]
+        L += [f"> ✂️ Analyzed from **{t['analyzed_from']}**; the first "
+              f"{t['skipped_min']} min (recorded from {t['recorded_from']}) "
+              "were skipped with `--start`.", ""]
+    if s.get("noisy_spans"):
+        L += ["> ⚠️ **Strap contact lost** — beats kept arriving, but these "
+              "stretches are mostly artifact. HR, zones and α1 inside them "
+              "are not real; re-run with `--start` past a bad lead-in.", ">"]
+        L += [f"> - {n['from']}–{n['to']} ({n['minutes']} min, "
+              f"{n['artifact_pct']}% of beats dropped)" for n in s["noisy_spans"]]
+        L.append("")
     if s["coverage"] < 0.9:
         L += ["> ⚠️ **Coverage below 0.90** — likely a Bluetooth dropout "
               "mid-recording. Check for a gap before trusting drift/HRR.", ""]
@@ -966,7 +1032,8 @@ def write_summary(out_dir: Path, s: dict) -> None:
         L += ["", f"Session mean α1 **{s['alpha1_mean']:.3f}** "
               f"(median {s['alpha1_median']:.3f}) · "
               f"median |ΔRR| {q.get('median_abs_drr_ms')} ms · "
-              f"RMSSD {q.get('rmssd_ms')} ms.", ""]
+              f"RMSSD {q.get('rmssd_ms')} ms raw, "
+              f"{q.get('rmssd_clean_ms')} ms after the artifact filter.", ""]
 
     if s.get("track"):
         t = s["track"]
@@ -1110,6 +1177,9 @@ def parse_args(argv=None):
                    help="Hours to add to track UTC times (default -7 = PDT)")
     p.add_argument("--hrmax", type=float, default=HRMAX_DEFAULT)
     p.add_argument("--hrrest", type=float, default=HRREST_DEFAULT)
+    p.add_argument("--start", default=None, metavar="HH:MM[:SS]",
+                   help="Analyze from this local clock time on (skip a noisy "
+                        "lead-in; see noisy_spans)")
     p.add_argument("--warmup", type=float, default=15.0,
                    help="Warmup minutes excluded from drift stats")
     p.add_argument("--band", action="append", default=None,
@@ -1163,8 +1233,13 @@ def main(argv=None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rr_df, ev_df, start_local, name = load_recording(args.db, pk)
+    recorded_from = pd.Timestamp(start_local)
+    skipped_sec = 0.0
+    if args.start:
+        rr_df, ev_df, start_local, skipped_sec = trim_start(
+            rr_df, ev_df, start_local, args.start)
 
-    hr_1hz, artifact_frac = beat_series(rr_df, args.pct_thresh)
+    hr_1hz, keep = beat_series(rr_df, args.pct_thresh)
     if args.mode != "auto":
         mode = args.mode
     else:
@@ -1186,7 +1261,7 @@ def main(argv=None) -> int:
         "recording_pk": pk, "name": name, "mode": mode,
         "start_local": str(start_local),
         "duration_sec": duration_sec, "duration_min": duration_sec / 60.0,
-        "n_beats": len(rr_df), "artifact_pct": artifact_frac * 100,
+        "n_beats": len(rr_df), "artifact_pct": float(1.0 - keep.mean()) * 100,
         "coverage": coverage,
         "hr_mean": float(hr_1hz["hr"].mean()),
         "hr_median": float(hr_1hz["hr"].median()),
@@ -1195,8 +1270,9 @@ def main(argv=None) -> int:
         # held for 10 s is the number to quote. A big gap to hr_max = spike.
         "hr_max_held_10s": float(hr_1hz["hr"].rolling(10).min().max()),
         "hr_min": float(hr_1hz["hr"].min()),
+        "hr_min_held_10s": float(hr_1hz["hr"].rolling(10).max().min()),
         "hrmax_stated": args.hrmax, "hrrest_stated": args.hrrest,
-        "rr_quality": rr_quality(rr_df, float(hr_1hz["hr"].mean())),
+        "rr_quality": rr_quality(rr_df, float(hr_1hz["hr"].mean()), keep),
         "zones": zone_breakdown(hr_1hz, args.hrmax, args.hrrest),
         "zones_units": "seconds",
         "alpha1_zones": alpha1_breakdown(feat),
@@ -1209,6 +1285,13 @@ def main(argv=None) -> int:
         "window_sec": args.window, "stride_sec": args.stride,
         "pct_thresh": args.pct_thresh,
     }
+    if skipped_sec:
+        s["trimmed"] = {"recorded_from": f"{recorded_from:%H:%M:%S}",
+                        "analyzed_from": f"{pd.Timestamp(start_local):%H:%M:%S}",
+                        "skipped_min": round(skipped_sec / 60.0, 1)}
+    noisy = noisy_spans(rr_df, keep, start_local)
+    if noisy:
+        s["noisy_spans"] = noisy
     if len(ev_df):
         s["markers"] = marker_list(ev_df, start_local)
 
