@@ -1,9 +1,10 @@
 # StrapLog skills for Claude Code
 
-Four [Claude Code](https://claude.com/claude-code) skills that analyze Polar H10 recordings exported from the StrapLog iOS app (one SQLite file per recording, RR intervals plus markers).
+Five [Claude Code](https://claude.com/claude-code) skills that analyze Polar H10 recordings exported from the StrapLog iOS app (one SQLite file per recording, RR intervals plus markers).
 
 | Skill | Ask Claude… | You get |
 |---|---|---|
+| `h10` | "analyze last night", "this morning's ruck" | picks the export and dispatches to the right skill below |
 | `h10-session` | "analyze this morning's ride" | HR, Karvonen %HRR zones, DFA α1, cardiac drift, per-set peaks and HRR for lifts, optional GPX/FIT overlay |
 | `hrv-overnight` | "how was my HRV last night" | overnight RMSSD/SDNN trajectory in blocks, Bluetooth coverage gaps, reconciliation against Apple Watch sleep staging |
 | `hrv-ramp-test` | "analyze my ramp test" | DFA α1 vs HR, AeT/VT1 (α1 = 0.75) and VT2 (α1 = 0.50) crossings, training zones |

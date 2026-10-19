@@ -31,7 +31,7 @@ Usage
 -----
   analyze_overnight.py --list                    # newest exports in iCloud Drive
   analyze_overnight.py --db 260726-2245-sleep.sqlite \
-      --health ~/Downloads/hrv260726/applehealth_*.json \
+      --health auto \
       --out ~/Downloads/hrv260726/overnight
 """
 
@@ -42,7 +42,6 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 import straplog.db as straplog_db
@@ -175,7 +174,20 @@ def block_trajectory(rows, block_sec=BLOCK_SEC) -> list[dict]:
 
 def rolling_extremes(rows, gaps_raw) -> dict:
     """Peak vagal tone and HR floor over 2-min windows, computed inside
-    continuous segments only so a dropout can't fabricate an extreme."""
+    continuous segments only so a dropout can't fabricate an extreme.
+
+    The raw figures (physiological gate only) keep the filed series
+    comparable; the `_clean` twins are recomputed after `hrv.artifact_mask`,
+    so an ectopic burst can't pose as peak vagal tone. A large raw-vs-clean
+    gap means the raw extreme is an artifact: report the clean one."""
+    keep = hrv.artifact_mask([v for _, v in rows])
+    clean_rows = [r for r, k in zip(rows, keep) if k]
+    raw, clean = _extremes(rows, gaps_raw), _extremes(clean_rows, gaps_raw)
+    return {**raw, **{f"{k}_clean": v for k, v in clean.items()},
+            "artifact_beats": int(len(gate(rows)) - keep.sum())}
+
+
+def _extremes(rows, gaps_raw) -> dict:
     starts = [rows[0][0]] + [g[1] for g in gaps_raw]
     ends = [g[0] for g in gaps_raw] + [rows[-1][0]]
     best_ln, low_hr = (-9.0, None), (999.0, None)
@@ -332,6 +344,7 @@ def _adapt_flat_health(d: dict) -> dict:
         "_adapted_from": "flat_morning_pull",
         "_anomaly_flags": d.get("anomaly_flags"),
         "_activity_yesterday": d.get("activity_yesterday"),
+        "_sleep_aggregate": d.get("sleep_aggregate"),
         "_physiology": d.get("physiology"),
         "_body": d.get("body"),
     }
@@ -376,6 +389,9 @@ def load_health(path: Path) -> dict:
         "known_gaps": meta.get("known_gaps", []),
         "adapted_from": d.get("_adapted_from"),
         "anomaly_flags": d.get("_anomaly_flags"),
+        "aggregate": d.get("_sleep_aggregate"),
+        "activity_yesterday": d.get("_activity_yesterday"),
+        "physiology": d.get("_physiology"),
     }
 
     # Provisional-pull check. The standing vault rule: a same-day Apple pull
@@ -399,6 +415,227 @@ def load_health(path: Path) -> dict:
         out["staging_stable"] = None
         out["rhr_trustworthy"] = None
     return out
+
+
+# ---------- Apple Health, fetched live (--health auto) ----------------------
+#
+# The Health Auto Export iPhone app serves MCP over HTTP on the LAN while it is
+# open. Fetching here replaces the old hand-off (Claude called the MCP tool,
+# then transcribed the stage list into applehealth_*.json). The result is
+# written in the flat morning-pull layout, so load_health() stays the only
+# parser.
+
+HAE_CONFIG = Path("~/.config/straplog/health.toml").expanduser()
+HAE_STAGES = ("Core", "Deep", "REM", "Awake")
+HAE_TIME = "%Y-%m-%d %H:%M:%S %z"
+
+
+def hae_config() -> tuple[str, str]:
+    """(url, token) from HEALTH_AUTO_EXPORT_URL/_TOKEN, else the toml file."""
+    import os
+    import tomllib
+    url = os.environ.get("HEALTH_AUTO_EXPORT_URL")
+    token = os.environ.get("HEALTH_AUTO_EXPORT_TOKEN")
+    if not (url and token) and HAE_CONFIG.exists():
+        cfg = tomllib.loads(HAE_CONFIG.read_text())
+        url, token = url or cfg.get("url"), token or cfg.get("token")
+    if not (url and token):
+        raise RuntimeError(f"no Health Auto Export endpoint: set HEALTH_AUTO_EXPORT_URL "
+                           f"and _TOKEN, or write url/token to {HAE_CONFIG}")
+    return url, token
+
+
+class HaeClient:
+    """Minimal MCP streamable-HTTP client: initialize once, then tools/call."""
+
+    def __init__(self, url: str, token: str, timeout: float = 20.0):
+        self.url, self.timeout = url, timeout
+        self.headers = {"Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream"}
+        self._id = 0
+        init = self._post("initialize", {
+            "protocolVersion": "2025-03-26", "capabilities": {},
+            "clientInfo": {"name": "straplog-skills", "version": "1"}})
+        if init.get("session_id"):
+            self.headers["Mcp-Session-Id"] = init["session_id"]
+        self._post("notifications/initialized", None, notify=True)
+
+    def _post(self, method: str, params, notify: bool = False) -> dict:
+        import urllib.request
+        body = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            body["params"] = params
+        if not notify:
+            self._id += 1
+            body["id"] = self._id
+        req = urllib.request.Request(self.url, json.dumps(body).encode(), self.headers)
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            sid = r.headers.get("Mcp-Session-Id")
+            text = r.read().decode()
+        if notify:
+            return {}
+        if text.lstrip().startswith("{"):
+            msg = json.loads(text)
+        else:   # SSE: the response is the last `data:` line
+            msg = json.loads([ln[5:] for ln in text.splitlines() if ln.startswith("data:")][-1])
+        if "error" in msg:
+            raise RuntimeError(f"{method}: {msg['error']}")
+        return {"session_id": sid, **msg.get("result", {})}
+
+    def call(self, tool: str, **arguments) -> dict:
+        res = self._post("tools/call", {"name": tool, "arguments": arguments})
+        text = "".join(c.get("text", "") for c in res.get("content", []))
+        if res.get("isError"):
+            raise RuntimeError(f"{tool}: {text[:200]}")
+        return json.loads(text)
+
+
+def _hae_metrics(resp: dict) -> dict[str, list[dict]]:
+    return {m["name"]: m.get("data", []) for m in resp.get("data", {}).get("metrics", [])}
+
+
+def _hae_daily(rows: list[dict], day) -> float | None:
+    q = next((r["qty"] for r in rows if r["date"][:10] == day.isoformat()), None)
+    return None if q is None else round(q, 1)
+
+
+def _hae_aggregate(agg_resp: dict, strip_end: datetime) -> dict | None:
+    """Apple's per-night totals. The per-epoch feed often stops before the
+    final wake (261016, 261017, 261018), so TST for the Sleep.md row comes
+    from here; the epochs still drive the awake-window reconciliation."""
+    nights = [r for r in _hae_metrics(agg_resp).get("sleep_analysis", [])
+              if r.get("sleepEnd")]
+    if not nights:
+        return None
+    end = lambda r: datetime.strptime(r["sleepEnd"], HAE_TIME)   # noqa: E731
+    r = min(nights, key=lambda r: abs((end(r) - strip_end).total_seconds()))
+    m = lambda k: round(60 * (r.get(k) or 0), 1)   # noqa: E731  hours -> min
+    return {"sleep_start_local": datetime.strptime(r["sleepStart"], HAE_TIME).isoformat(),
+            "sleep_end_local": end(r).isoformat(),
+            "tst_min": m("totalSleep"), "core_min": m("core"), "deep_min": m("deep"),
+            "rem_min": m("rem"), "awake_min": m("awake")}
+
+
+def health_pull(sleep_resp: dict, daily_resp: dict, hrv_resp: dict, agg_resp: dict,
+                strip_start: datetime, strip_end: datetime, now: datetime) -> dict:
+    """Map Health Auto Export responses onto the flat morning-pull layout.
+
+    `strip_start` / `strip_end` are the H10 strip's aware local datetimes;
+    staged epochs overlapping [start - 1 h, end + 2 h] count as this night.
+    """
+    lo, hi = strip_start - timedelta(hours=1), strip_end + timedelta(hours=2)
+    seen, epochs = set(), []
+    for r in _hae_metrics(sleep_resp).get("sleep_analysis", []):
+        if r.get("value") not in HAE_STAGES:
+            continue
+        a, b = datetime.strptime(r["start"], HAE_TIME), datetime.strptime(r["end"], HAE_TIME)
+        if b <= lo or a >= hi or (a, b) in seen:
+            continue
+        seen.add((a, b))
+        epochs.append((r["value"], a, b))
+    if not epochs:
+        raise RuntimeError("no Watch sleep staging overlaps the strip")
+    epochs.sort(key=lambda e: e[1])
+
+    mins = {s: 0.0 for s in HAE_STAGES}
+    for s, a, b in epochs:
+        mins[s] += (b - a).total_seconds() / 60
+    first, last = epochs[0][1], epochs[-1][2]
+    span = (last - first).total_seconds() / 60
+    tst = mins["Core"] + mins["Deep"] + mins["REM"]
+    awake = [(b - a).total_seconds() / 60 for s, a, b in epochs if s == "Awake"]
+    pct = lambda m: round(100 * m / tst, 1) if tst else None   # noqa: E731
+
+    wake_day = last.date()
+    daily = _hae_metrics(daily_resp)
+    yday = wake_day - timedelta(days=1)
+    hrv_samples = []
+    for r in _hae_metrics(hrv_resp).get("heart_rate_variability", []):
+        t = datetime.strptime(r["date"], HAE_TIME)
+        hrv_samples.append({"time_local": t.isoformat(), "sdnn_ms": round(r["qty"], 1),
+                            "in_sleep_window": first <= t <= last})
+    hours_after_wake = (now - last).total_seconds() / 3600
+
+    return {
+        "schema_version": "1.0",
+        "date_label": wake_day.strftime("%y%m%d"),
+        "captured_at_local": now.isoformat(timespec="seconds"),
+        "sleep_window": {
+            "staged_span_start_local": first.isoformat(),
+            "staged_span_end_local": last.isoformat(),
+            "staged_span_min": round(span, 1),
+            "tst_min": round(tst, 1),
+            "sleep_efficiency_pct_vs_staged_span": round(100 * tst / span, 1) if span else None,
+        },
+        "sleep_architecture": {
+            "tst_min": round(tst, 1),
+            "core_min": round(mins["Core"], 1), "core_pct_tst": pct(mins["Core"]),
+            "n3_deep_min": round(mins["Deep"], 1), "n3_pct_tst": pct(mins["Deep"]),
+            "rem_min": round(mins["REM"], 1), "rem_pct_tst": pct(mins["REM"]),
+            "wake_stage_at_final_arousal": epochs[-1][0],
+        },
+        "waso": {
+            "waso_total_min": round(sum(awake), 1),
+            "episode_count": len(awake),
+            "longest_episode_min": round(max(awake), 1) if awake else 0.0,
+        },
+        "sleep_aggregate": _hae_aggregate(agg_resp, strip_end),
+        "sleep_epochs_staged": [
+            {"stage": s, "start_local": a.isoformat(), "end_local": b.isoformat(),
+             "min": round((b - a).total_seconds() / 60, 1)} for s, a, b in epochs],
+        "autonomic": {
+            "rhr_today_bpm": _hae_daily(daily.get("resting_heart_rate", []), wake_day),
+            "rhr_yesterday_bpm": _hae_daily(daily.get("resting_heart_rate", []), yday),
+            "hrv_samples": hrv_samples,
+        },
+        "activity_yesterday": {
+            "steps": _hae_daily(daily.get("step_count", []), yday),
+            "active_kcal": _hae_daily(daily.get("active_energy", []), yday),
+            "exercise_min": _hae_daily(daily.get("apple_exercise_time", []), yday),
+            "walking_hr_avg": _hae_daily(daily.get("walking_heart_rate_average", []), yday),
+        },
+        "physiology": {
+            "resp_rate": _hae_daily(daily.get("respiratory_rate", []), wake_day),
+            "spo2_pct": _hae_daily(daily.get("blood_oxygen_saturation", []), wake_day),
+        },
+        "provenance": {
+            # Staging commits ~T+2 h after final wake; RHR is gated separately
+            # (>= 18 h) in load_health(), whatever this says.
+            "provisional": hours_after_wake < 2.0,
+            "source": f"Health Auto Export MCP, fetched {now:%Y-%m-%d %H:%M} "
+                      f"({hours_after_wake:.1f} h after final staged wake)",
+        },
+    }
+
+
+def fetch_health(strip_start: datetime, strip_end: datetime, out_dir: Path) -> Path:
+    """Fetch the night's Watch data and write applehealth_<YYMMDD>.json.
+
+    Takes the strip's naive local datetimes; the system zone supplies the
+    offset for that date (DST-correct for back-dated nights)."""
+    a, b = strip_start.astimezone(), strip_end.astimezone()
+    lo, hi = a - timedelta(hours=1), b + timedelta(hours=2)
+    fmt = lambda t: t.strftime(HAE_TIME)   # noqa: E731
+    day0 = (b.date() - timedelta(days=1)).strftime("%Y-%m-%d 00:00:00 ") + b.strftime("%z")
+    day1 = b.strftime("%Y-%m-%d 23:59:59 %z")
+
+    hae = HaeClient(*hae_config())
+    sleep = hae.call("get_health_metrics", start=fmt(lo), end=fmt(hi),
+                     metrics="sleep_analysis", aggregate=False)
+    daily = hae.call("get_health_metrics", start=day0, end=day1, interval="days",
+                     metrics="resting_heart_rate,respiratory_rate,blood_oxygen_saturation,"
+                             "step_count,active_energy,apple_exercise_time,"
+                             "walking_heart_rate_average")
+    hrv_ = hae.call("get_health_metrics", start=fmt(lo), end=fmt(hi),
+                    metrics="heart_rate_variability", aggregate=False)
+    agg = hae.call("get_health_metrics", start=fmt(b - timedelta(hours=18)),
+                   end=fmt(b + timedelta(hours=6)), metrics="sleep_analysis",
+                   aggregate=True, interval="days")
+    pull = health_pull(sleep, daily, hrv_, agg, a, b, datetime.now().astimezone())
+    path = out_dir / f"applehealth_{pull['date_label']}.json"
+    path.write_text(json.dumps(pull, indent=1))
+    return path
 
 
 def reconcile_awake(rows, awake_windows, strip_start: datetime) -> list[dict]:
@@ -497,6 +734,10 @@ def write_summary(s: dict, path: Path):
           f"| pNN50 | {q['pnn50']:.1f}% |",
           f"| Peak vagal LnRMSSD (2-min) | **{s['extremes']['peak_vagal_ln_rmssd']}** "
           f"@ {s['extremes']['peak_vagal_at']} |",
+          f"| Artifact-cleaned: LnRMSSD / peak vagal / HR floor | "
+          f"{q['ln_rmssd_clean']:.3f} / {s['extremes']['peak_vagal_ln_rmssd_clean']} "
+          f"@ {s['extremes']['peak_vagal_at_clean']} / {s['extremes']['hr_floor_bpm_clean']} "
+          f"@ {s['extremes']['hr_floor_at_clean']} ({s['extremes']['artifact_beats']} beats dropped) |",
           ""]
 
     if s.get("sleep"):
@@ -585,7 +826,8 @@ def parse_args(argv=None):
                    help="Recording pk. Default: the most recent strip that "
                         "looks like an overnight.")
     p.add_argument("--health", type=Path, default=None,
-                   help="Apple Health JSON export for the same night")
+                   help="Apple Health JSON for the same night (path or glob), or "
+                        "`auto` to fetch it from Health Auto Export on the iPhone")
     p.add_argument("--out", type=Path, default=None,
                    help="Output dir (default <db parent>/overnight)")
     p.add_argument("--no-plots", action="store_true")
@@ -652,11 +894,24 @@ def main(argv=None) -> int:
         "n_beats": len(rows),
         "coverage_pct": cov,
         "gaps": gaps,
-        "whole_strip": {k: round(v, 3) for k, v in whole.items()},
+        "whole_strip": {k: round(v, 3) for k, v in whole.items()}
+                       | {"ln_rmssd_clean": round(td_stats(list(hrv.clean_rr(gate(rows))))["ln_rmssd"], 3)},
         "extremes": rolling_extremes(rows, gaps_raw),
         "blocks": block_trajectory(rows),
+        "db": str(args.db),
+        "end_date": ts_to_local(rows[-1][0]).strftime("%Y-%m-%d"),
+        "markers": [{"time": hm(r.t), "note": str(r.note or "").strip()}
+                    for r in straplog_db.load_events(args.db, pk).itertuples()],
     }
 
+    if str(args.health) == "auto":
+        try:
+            args.health = fetch_health(start_dt, ts_to_local(rows[-1][0]), out_dir)
+        except Exception as e:   # phone off the LAN, app closed: run without it
+            s["health_file"] = None
+            s["health_warning"] = (f"Health Auto Export fetch failed ({type(e).__name__}: {e}); "
+                                   "open the app on the iPhone and re-run")
+            args.health = None
     if args.health:
         hp = args.health
         if not hp.exists():   # allow a glob

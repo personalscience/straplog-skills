@@ -50,9 +50,9 @@ Useful flags: `--hrmax` / `--hrrest` (default **182 / 57**, Richard's audited an
 
 **Bands default to the corrected table: Z2 `120-145`, Z3 `145-158`.** If a note or an older command line says `115-135` / `136-150`, that is stale — do not copy it. Why: `reference/history.md`.
 
-Outputs to `--out`: `summary.md`, `session.png`, `hr_alpha1.png`, `hr_1hz.csv`, `windowed_features.csv`. Full JSON goes to stdout — **parse that first**, and read the JSON *or* `summary.md`, never both (~80% redundant). The two zone blocks use different units: `zones` is **seconds**, `alpha1_zones` counts **2-min windows**. Don't load the PNGs unless you need to look at the curve.
+Outputs to `--out`: `summary.md`, `summary.json` (everything, including the full set list), `session.png`, `hr_alpha1.png`, `hr_1hz.csv`, `windowed_features.csv`. A slim JSON goes to stdout. **Parse that first**, and read the JSON *or* `summary.md`, never both (~80% redundant). With diamonds, stdout has `stations` and `n_sets` but not the peak list. The two zone blocks use different units: `zones` is **seconds**, `alpha1_zones` counts **2-min windows**. Don't load the PNGs unless you need to look at the curve.
 
-**A one-sample HR peak is an artifact, not a max effort.** Check how long the peak was *held* before reporting it — grep `hr_1hz.csv` for seconds-above-threshold before quoting `hr_max`. A genuine max leaves a plateau. Cases: `reference/history.md`.
+**A one-sample HR peak is an artifact, not a max effort.** Quote `hr_max_held_10s` (the highest HR held for 10 s), not `hr_max`. A big gap between them means a spike. No need to grep `hr_1hz.csv`. Cases: `reference/history.md`.
 
 ### 3. Companion tracks — always pass one if it exists
 
@@ -80,11 +80,13 @@ Two rules that apply even when the gate passes, because they bite constantly:
 
 **Without diamonds**, mapping is **greedy first-N** from `--sets`, so mid-session transitions create extra peaks and shift every later label; confirm the table with Richard before filing.
 
-**HRR anchor.** `--rest-marker` anchors to the **sitting onset after the `end` diamond**: the last high point before the first sustained fall (HR ≥10 bpm lower throughout the next 45–75 s), because Richard usually walks to the car first. No fall within 5 min → the `end` diamond; no `end` → the last diamond (right when it is `car home`, wrong when it is `Home`). Without `--rest-marker`, the anchor is the last detected peak, usually wrong for machine circuits. `hrr.anchor_time` and `hrr.anchor_method` say which was used; anchor and endpoint HR are ±2 s means. Sanity-check the anchor on the plot. `sets` in the JSON is capped at 12; `summary.md` always holds the full table.
+**HRR anchor.** `--rest-marker` anchors to the **sitting onset after the `end` diamond**: the last high point before the first sustained fall (HR ≥10 bpm lower throughout the next 45–75 s), because Richard usually walks to the car first. No fall within 5 min → the `end` diamond; no `end` → the last diamond (right when it is `car home`, wrong when it is `Home`). Without `--rest-marker`, the anchor is the last detected peak, usually wrong for machine circuits. `hrr.anchor_time` and `hrr.anchor_method` say which was used; anchor and endpoint HR are ±2 s means. Sanity-check the anchor on the plot. Without diamonds, stdout `sets` is capped at 12; `summary.json` and `summary.md` always hold the full list.
 
 ### 6. File it
 
 **Naming — the note's basename always repeats its folder name; never `analysis.md`.** `Ravine Walk 260724/Ravine Walk 260724.md`, so `[[Ravine Walk 260724]]` resolves without a subpath. Times are **local** — label them `HH:MM PDT`.
+
+**Run `Health2026/tools/file_h10.py session <out_dir>` when it exists.** It makes the folder, copies the files and writes the strength CSV row once the sets are confirmed; see `Health2026/CLAUDE.md`.
 
 Endurance → `Fitness/Cycling/` (or the activity folder) with the PNGs alongside. Strength → `Fitness/Strength/`, **both** `Fitness.md` tables, and a row in `~/Documents/polar_strength_log.csv`. Full checklist: `reference/filing.md` and `Health2026/CLAUDE.md`.
 

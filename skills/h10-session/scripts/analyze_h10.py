@@ -340,12 +340,10 @@ def longest_in_band(hr_1hz: pd.DataFrame, lo: float, hi: float) -> dict:
     """Longest continuous stretch inside an HR band (allows 15 s excursions)."""
     inside = ((hr_1hz["hr"] >= lo) & (hr_1hz["hr"] <= hi)).to_numpy()
     best = cur = 0
-    best_end = cur_start = 0
+    best_end = 0
     grace = 0
     for i, v in enumerate(inside):
         if v:
-            if cur == 0:
-                cur_start = i
             cur += 1 + grace
             grace = 0
         else:
@@ -992,8 +990,8 @@ def write_summary(out_dir: Path, s: dict) -> None:
     if s.get("hr_reconciliation"):
         r = s["hr_reconciliation"]
         L += ["## Sensor reconciliation (track HR vs H10 RR)", "",
-              f"The companion track carries its own HR — an **independent "
-              f"recording of the same heartbeats** through a different app.",
+              "The companion track carries its own HR — an **independent "
+              "recording of the same heartbeats** through a different app.",
               "",
               f"- Agreement over {r['n_samples']:,} samples: **r = {r['corr']}**, "
               f"mean difference {r['mean_diff_bpm']:+.2f} bpm, "
@@ -1193,6 +1191,9 @@ def main(argv=None) -> int:
         "hr_mean": float(hr_1hz["hr"].mean()),
         "hr_median": float(hr_1hz["hr"].median()),
         "hr_max": float(hr_1hz["hr"].max()),
+        # A one-sample spike is an artifact, not a max effort: the highest HR
+        # held for 10 s is the number to quote. A big gap to hr_max = spike.
+        "hr_max_held_10s": float(hr_1hz["hr"].rolling(10).min().max()),
         "hr_min": float(hr_1hz["hr"].min()),
         "hrmax_stated": args.hrmax, "hrrest_stated": args.hrrest,
         "rr_quality": rr_quality(rr_df, float(hr_1hz["hr"].mean())),
@@ -1304,9 +1305,18 @@ def main(argv=None) -> int:
     hr_1hz.to_csv(out_dir / "hr_1hz.csv", index=False)
     write_summary(out_dir, s)
 
+    full = dict(s, sets=s.pop("_all_sets", s.get("sets")))
+    full.pop("sets_truncated", None)
+    (out_dir / "summary.json").write_text(
+        json.dumps(round_floats(full), indent=2, default=str))
     s["out_dir"] = str(out_dir)
     s["files"] = sorted(p.name for p in out_dir.iterdir())
-    s.pop("_all_sets", None)
+    if s.get("stations"):
+        # Diamonds give the station table; the peak list repeats it with
+        # station labels. Full list in summary.json / summary.md.
+        s["n_sets"] = len(full.get("sets") or [])
+        s.pop("sets", None)
+        s.pop("sets_truncated", None)
     print(json.dumps(round_floats(s), indent=2, default=str))
     return 0
 

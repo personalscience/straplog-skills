@@ -35,19 +35,38 @@ nights.** Check `--list` before assuming the newest is the one you want.
 
 ```bash
 ${CLAUDE_SKILL_DIR}/scripts/analyze_overnight.py \
-  --db 260726-2245-sleep.sqlite \
-  --health ~/Downloads/hrv260726/applehealth_*.json \
+  --db 260726-2245-sleep.sqlite --recording 24 \
+  --health auto \
   --out ~/Downloads/hrv260726/overnight
 ```
 
-`--health` is optional and the run degrades cleanly without it (you lose
-staging and the awake-window reconciliation, keep all H10 autonomics). A glob
-is accepted. A missing file is reported in `health_warning`, not fatal.
+**`--health auto` fetches the Watch staging itself** from the Health Auto
+Export app's server on the iPhone (endpoint and token in
+`~/.config/straplog/health.toml`, or `HEALTH_AUTO_EXPORT_URL` / `_TOKEN`) and
+writes `applehealth_<YYMMDD>.json` into `--out`. **Don't call the
+health-auto-export MCP tools and don't build that JSON by hand**: it costs
+a dozen turns and the script does it identically. If the fetch fails (app
+closed, phone off the LAN), the run still completes and `health_warning`
+says so. Ask Rik to open the app, then re-run. `--health <path-or-glob>` still
+takes a saved JSON (re-runs, old nights).
 
-Outputs to `--out`: `summary.md`, `summary.json`, `night_trajectory.png`,
-`tachogram.png`. **Slim JSON goes to stdout** — the 30-min block table is
-omitted there (it is in `summary.json` and `summary.md`) to keep stdout small.
-Read the stdout JSON *or* `summary.md`, not both.
+Outputs to `--out`: `summary.md`, `summary.json`, `applehealth_*.json`,
+`night_trajectory.png`, `tachogram.png`. **Slim JSON goes to stdout** (the
+30-min block table is only in `summary.json` / `summary.md`). Read the stdout
+JSON *or* `summary.md`, not both, and don't grep the script. The stdout keys:
+
+| Key | Holds |
+|---|---|
+| `coverage_pct`, `gaps` | capture quality (step 3) |
+| `whole_strip` | `mean_hr`, `rmssd`, `ln_rmssd`, `sdnn`, `pnn50`, `ln_rmssd_clean` |
+| `extremes` | raw 2-min `peak_vagal_ln_rmssd`/`_at`, `hr_floor_bpm`/`_at`; the same with `_clean` after the artifact filter; `artifact_beats` |
+| `sleep` | Watch architecture, `staging_stable`, `rhr_trustworthy`, `hours_after_wake`, RHR, `watch_sdnn` |
+| `awake_reconciliation` | per Watch awake window: H10 mean HR, range, bump vs baseline |
+
+**Raw vs clean extremes.** Raw values continue the filed series. When the raw
+peak vagal value is well above `_clean` (night 261018: 5.19 at 02:22 raw vs 4.24
+at 00:38 clean), the raw one sits on ectopic or missed beats. Report the clean
+one and say why. No ad-hoc RR re-analysis is needed.
 
 ### 3. Check capture quality BEFORE interpreting anything
 
@@ -61,7 +80,7 @@ dropout cannot fabricate a peak-vagal or HR-floor value.
 
 ### 4. 🛑 Provenance gates — these decide what may be said
 
-When `--health` is passed, the script reads the pull time and sets:
+With Watch data, the script reads the pull time and sets:
 
 - **`staging_stable`** — false when the pull ran <2 h after final wake. Sleep
   *staging* has been stable on every re-pull past T+2 h, so this is usually a
@@ -93,6 +112,8 @@ sample SD, ddof=1. Both changed when this skill moved to the shared package,
 ### 6. File it
 
 Per the `Health2026/CLAUDE.md` router:
+
+**Run `Health2026/tools/file_h10.py sleep <out_dir>` when it exists.** It does everything below except the narrative, and leaves TODO markers for you to fill.
 
 - Folder `Sleep/HRV Reference/SleepHRV-YYMMDD/` — **YYMMDD is the morning
   wakeup date**, the day Rik rose, not the night he went to bed. This is
