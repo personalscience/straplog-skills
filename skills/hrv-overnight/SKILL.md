@@ -109,6 +109,23 @@ and *are* the mean of beat HRs, 0.2–1.7 bpm above the old figure; SDNN is the
 sample SD, ddof=1. Both changed when this skill moved to the shared package,
 2026-10-18 — mind the step when comparing with earlier filed nights.)
 
+### 5b. Read the stage reconciliation
+
+`stage_reconciliation` (in `summary.json`, stdout and a `summary.md` table) has
+H10 mean HR, RMSSD and LnRMSSD inside **every** Watch epoch (`epochs`), plus a
+`by_stage` rollup pooling epochs ≥3 min. Beats are artifact-cleaned, and RMSSD
+never bridges an epoch boundary or a dropout; shorter epochs report HR only
+(`note: "short"`). Mean HR uses the awake-window convention above.
+
+Use it to ask whether the Watch's labels hold up: N3 is expected to carry the
+night's lowest HR and more vagal tone than REM. **A Deep rollup that matches
+Core is weak support for the Watch's deep figure; it is not proof the staging
+is wrong.** Compare within the night, never across nights. The late-night HR
+trough lowers whatever stage sits in it, so check a Deep epoch against its
+Core neighbours, not against the night mean. Across 261018–261020, REM separated
+clearly (higher HR, lower LnRMSSD on 2 of 3 nights) and Deep never separated
+from Core.
+
 ### 6. File it
 
 Per the `Health2026/CLAUDE.md` router:

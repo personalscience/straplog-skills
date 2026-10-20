@@ -18,7 +18,8 @@ Pipeline
   2. Apple Health   -> sleep architecture (already computed upstream), cycles,
      (optional)        epochs, provenance flag
   3. Reconciliation -> per Watch-staged awake window, the H10 HR bump that
-                       independently corroborates it as genuine wake
+                       independently corroborates it as genuine wake; and H10
+                       HR / RMSSD inside every staged epoch, rolled up by stage
 
 Timestamps
 ----------
@@ -39,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -359,14 +361,16 @@ def load_health(path: Path) -> dict:
     meta = d.get("export_metadata", {}) or {}
     cardio = d.get("cardiovascular", {}) or {}
 
-    awake = []
+    awake, epochs = [], []
     for e in sleep.get("epochs", []) or []:
+        w = {
+            "start": _parse_local(e["start_local"]),
+            "end": _parse_local(e["end_local"]),
+            "duration_min": round(float(e.get("duration_min", 0)), 1),
+        }
+        epochs.append({"stage": str(e.get("stage", "")), **w})
         if str(e.get("stage", "")).lower().startswith("awake"):
-            awake.append({
-                "start": _parse_local(e["start_local"]),
-                "end": _parse_local(e["end_local"]),
-                "duration_min": round(float(e.get("duration_min", 0)), 1),
-            })
+            awake.append(w)
 
     out = {
         "provenance_flag": meta.get("provenance_flag"),
@@ -380,6 +384,7 @@ def load_health(path: Path) -> dict:
         "architecture": arch,
         "cycles": sleep.get("cycles", []),
         "awake_windows": awake,
+        "stage_epochs": epochs,
         "resting_heart_rate_bpm": cardio.get("resting_heart_rate_bpm"),
         "resting_heart_rate_prior_day_bpm": cardio.get("resting_heart_rate_prior_day_bpm"),
         "rhr_baseline_14d_mean_bpm": cardio.get("rhr_baseline_14d_mean_bpm"),
@@ -676,6 +681,83 @@ def reconcile_awake(rows, awake_windows, strip_start: datetime) -> list[dict]:
     return out
 
 
+MIN_STAGE_SEC = 180.0   # below this an epoch's RMSSD is noise: HR only
+MIN_PAIRS = 30          # successive differences needed before quoting RMSSD
+STAGE_ORDER = ("Deep", "Core", "REM", "Awake")
+
+
+def _stage_name(raw: str) -> str:
+    s = raw.split()[0].capitalize() if raw else "?"
+    return "REM" if s == "Rem" else s
+
+
+def _rmssd(sq: list[float]) -> dict:
+    if len(sq) < MIN_PAIRS:
+        return {}
+    rm = (sum(sq) / len(sq)) ** 0.5
+    return {"rmssd": round(rm, 1), "ln_rmssd": round(math.log(rm), 3)}
+
+
+def reconcile_stages(rows, epochs) -> dict:
+    """H10 autonomics inside every Watch-staged epoch, plus a per-stage
+    rollup. Within one night, N3 is expected to carry the lowest HR and more
+    vagal tone than REM; a Deep epoch indistinguishable from its Core
+    neighbours is weakly supported. This corroborates the Watch's labels; it
+    cannot stage sleep from the H10 alone.
+
+    Beats pass `hrv.artifact_mask` (the `_clean` convention). Successive
+    differences are taken only between beats adjacent in the raw stream,
+    inside one epoch and never across a dropout, so RMSSD can't bridge a stage
+    boundary or a gap. Mean HR is 60000 / mean(RR), as in reconcile_awake.
+    The rollup pools only epochs of at least MIN_STAGE_SEC."""
+    keep = hrv.artifact_mask([v for _, v in rows])
+    per, pool = [], {}
+    for e in epochs:
+        a = (e["start"] - REF).total_seconds()
+        b = (e["end"] - REF).total_seconds()
+        rrs, sq, prev = [], [], None   # prev = (raw index, ts, rr) of last kept beat
+        for i, ((ts, v), k) in enumerate(zip(rows, keep)):
+            if ts < a:
+                continue
+            if ts > b:
+                break
+            if not (k and gated(v)):
+                prev = None
+                continue
+            rrs.append(v)
+            if prev and prev[0] == i - 1 and ts - prev[1] <= GAP_SEC:
+                sq.append((v - prev[2]) ** 2)
+            prev = (i, ts, v)
+        stage = _stage_name(e["stage"])
+        long_enough = (b - a) >= MIN_STAGE_SEC
+        row = {"stage": stage,
+               "window": f"{e['start']:%H:%M}-{e['end']:%H:%M}",
+               "duration_min": e["duration_min"],
+               "n_beats": len(rrs)}
+        if len(rrs) >= 5:
+            row["h10_mean_hr"] = round(60000.0 / (sum(rrs) / len(rrs)), 1)
+        if long_enough:
+            row |= _rmssd(sq)
+        if len(rrs) < 5:
+            row["note"] = "no H10 coverage"
+        elif not long_enough:
+            row["note"] = "short"
+        per.append(row)
+        if long_enough and rrs:
+            p = pool.setdefault(stage, {"min": 0.0, "rr": [], "sq": [], "n": 0})
+            p["min"] += e["duration_min"]
+            p["rr"] += rrs
+            p["sq"] += sq
+            p["n"] += 1
+
+    rank = {s: i for i, s in enumerate(STAGE_ORDER)}
+    by_stage = [{"stage": st, "n_epochs": p["n"], "minutes": round(p["min"], 1),
+                 "h10_mean_hr": round(60000.0 / (sum(p["rr"]) / len(p["rr"])), 1),
+                 **_rmssd(p["sq"])}
+                for st, p in sorted(pool.items(), key=lambda kv: rank.get(kv[0], 9))]
+    return {"epochs": per, "by_stage": by_stage}
+
+
 # ---------- plots ---------------------------------------------------------
 
 def plot_night(blocks, out_path: Path, title: str):
@@ -790,6 +872,26 @@ def write_summary(s: dict, path: Path):
         L += ["", "> An HR bump above sleeping baseline in each window is "
                   "independent evidence the WASO is genuine wake, not staging "
                   "noise.", ""]
+
+    sr = s.get("stage_reconciliation") or {}
+    if sr.get("by_stage"):
+        L += ["## H10 by Watch stage", "",
+              "| Stage | Epochs ≥3 min | Minutes | H10 mean HR | RMSSD | LnRMSSD |",
+              "|---|---|---|---|---|---|"]
+        for r in sr["by_stage"]:
+            L.append(f"| {r['stage']} | {r['n_epochs']} | {r['minutes']} | "
+                     f"{r['h10_mean_hr']} | {r.get('rmssd', '—')} | "
+                     f"{r.get('ln_rmssd', '—')} |")
+        L += ["", "| Epoch | Stage | Min | H10 mean HR | RMSSD | LnRMSSD | Note |",
+              "|---|---|---|---|---|---|---|"]
+        for r in sr["epochs"]:
+            L.append(f"| {r['window']} | {r['stage']} | {r['duration_min']} | "
+                     f"{r.get('h10_mean_hr', '—')} | {r.get('rmssd', '—')} | "
+                     f"{r.get('ln_rmssd', '—')} | {r.get('note', '')} |")
+        L += ["", "> N3 is expected to show the night's lowest HR and more vagal "
+                  "tone than REM; Deep that matches Core is weakly supported. Artifact-cleaned "
+                  "beats; RMSSD never bridges an epoch boundary or a dropout; "
+                  "epochs under 3 min report HR only.", ""]
 
     if s["gaps"]:
         L += ["## ⚠️ Dropout gaps (>15 s)", "",
@@ -928,9 +1030,11 @@ def main(argv=None) -> int:
             s["health_file"] = str(hp)
             s["awake_reconciliation"] = reconcile_awake(
                 rows, s["sleep"]["awake_windows"], start_dt)
-            # awake_windows carry datetimes; drop them from the JSON payload
+            s["stage_reconciliation"] = reconcile_stages(
+                rows, s["sleep"]["stage_epochs"])
+            # the epoch lists carry datetimes; drop them from the JSON payload
             s["sleep"] = {k: v for k, v in s["sleep"].items()
-                          if k != "awake_windows"}
+                          if k not in ("awake_windows", "stage_epochs")}
         else:
             s["health_file"] = None
             s["health_warning"] = f"Apple Health file not found: {args.health}"
