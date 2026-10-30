@@ -43,6 +43,8 @@ Pick the row that matches the request; if two plausibly match, ask. Pass
 
 Say which rule decided, so a wrong guess is easy to correct.
 
+**BaroShift, on top of any route:** if a marker or the name mentions BaroShift (or Rik says he did a breathing session), also run **baroshift** on the same export. It finds and scores the paced-breathing windows; the main skill still analyses the recording.
+
 ## 3. Report
 
 Lead with the recording (`started_local`, name, duration, coverage), then the
