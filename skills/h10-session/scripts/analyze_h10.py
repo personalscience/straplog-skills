@@ -1259,6 +1259,7 @@ def main(argv=None) -> int:
 
     s = {
         "recording_pk": pk, "name": name, "mode": mode,
+        "db": str(args.db),
         "start_local": str(start_local),
         "duration_sec": duration_sec, "duration_min": duration_sec / 60.0,
         "n_beats": len(rr_df), "artifact_pct": float(1.0 - keep.mean()) * 100,

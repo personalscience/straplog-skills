@@ -62,6 +62,8 @@ JSON *or* `summary.md`, not both, and don't grep the script. The stdout keys:
 | `extremes` | raw 2-min `peak_vagal_ln_rmssd`/`_at`, `hr_floor_bpm`/`_at`; the same with `_clean` after the artifact filter; `artifact_beats` |
 | `sleep` | Watch architecture, `staging_stable`, `rhr_trustworthy`, `hours_after_wake`, RHR, `watch_sdnn` |
 | `awake_reconciliation` | per Watch awake window: H10 mean HR, range, bump vs baseline |
+| `h10_sleep` | H10-only onset, wake bouts, WASO, TST (`tst_min`, `tst_max_min` if dropouts were sleep), efficiency; always present |
+| `h10_sleep_vs_watch` | with Watch data: Watch vs H10 TST over the same window, epoch agreement, % of Watch wake caught |
 
 **Raw vs clean extremes.** Raw values continue the filed series. When the raw
 peak vagal value is well above `_clean` (night 261018: 5.19 at 02:22 raw vs 4.24
@@ -125,6 +127,12 @@ trough lowers whatever stage sits in it, so check a Deep epoch against its
 Core neighbours, not against the night mean. Across 261018–261020, REM separated
 clearly (higher HR, lower LnRMSSD on 2 of 3 nights) and Deep never separated
 from Core.
+
+### 5c. H10-only sleep estimate (`h10_sleep`)
+
+Every run estimates sleep from the H10 alone. The window runs from the first `lights_out` diamond to the last `up`/`awake` one, falling back to the strip edges. Wake is HR ≥8 bpm above a rolling ±30-min sleeping baseline (the 20th percentile) for at least 1 min. Onset is the first 10 minutes with no wake. Dropout epochs are unknown, never sleep: `tst_min` excludes them, and `tst_max_min` counts them as sleep.
+
+**Use it only when the Watch has no staging** (dead battery, Watch off). When Watch data exists, the Watch's TST stays the number of record, and `h10_sleep_vs_watch` keeps scoring the detector each night. Calibration (6 nights, wake dates 2026-10-18 → 10-24): TST was within ±23 min of the Watch on average (range −36 to +55 min) and onset within 7 min. Bout-by-bout agreement was only ~45%, since quiet wake is invisible to HR and REM surges can look like wake. Quote it as "H10 estimate ~X h", never as a measured TST.
 
 ### 6. File it
 
