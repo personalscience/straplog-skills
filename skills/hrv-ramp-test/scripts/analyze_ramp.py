@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy", "pandas", "straplog[plot]>=0.3"]
+# dependencies = ["numpy", "pandas", "straplog[plot]>=0.3.1"]
 # ///
 """
 DFA alpha1 analysis of a graded ramp test recorded with StrapLog.
@@ -194,16 +194,19 @@ def plot_timeseries(feat: pd.DataFrame, ev: pd.DataFrame, path: Path):
 # ---------- zone table ----------------------------------------------------
 
 def zone_table(aet, vt1, mid, vt2) -> pd.DataFrame:
+    def bpm(hr):
+        return "?" if hr is None else round(hr)   # threshold not reached
+
     rows = [
-        ("Z1 – Recovery",      f"< {round(aet)}",
+        ("Z1 – Recovery",      f"< {bpm(aet)}",
          "α1 > 1.0 · sub-AeT · too easy for an aerobic stimulus"),
-        ("Z2 – Aerobic base",  f"{round(aet)}–{round(vt1)}",
+        ("Z2 – Aerobic base",  f"{bpm(aet)}–{bpm(vt1)}",
          "α1 ≈ 1.0→0.75 · true Seiler Z2 · fat-ox, mitochondrial"),
-        ("Z3 – Tempo",         f"{round(vt1)}–{round(mid)}",
+        ("Z3 – Tempo",         f"{bpm(vt1)}–{bpm(mid)}",
          "α1 ≈ 0.75→0.60 · moderate / 'grey zone'"),
-        ("Z4 – Threshold",     f"{round(mid)}–{round(vt2)}",
+        ("Z4 – Threshold",     f"{bpm(mid)}–{bpm(vt2)}",
          "α1 ≈ 0.60→0.50 · LT2 / VT2 approach"),
-        ("Z5 – VO2max",        f"> {round(vt2)}",
+        ("Z5 – VO2max",        f"> {bpm(vt2)}",
          "α1 < 0.50 · above VT2, maximal aerobic / anaerobic"),
     ]
     return pd.DataFrame(rows, columns=["zone", "hr_bpm", "description"])

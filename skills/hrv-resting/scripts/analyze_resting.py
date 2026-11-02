@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy", "pandas", "straplog[plot]>=0.3"]
+# dependencies = ["numpy", "pandas", "straplog[plot]>=0.3.1"]
 # ///
 """
 Resting HRV analyzer for StrapLog recordings (via the `straplog` package).
@@ -33,7 +33,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np

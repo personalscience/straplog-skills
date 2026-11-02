@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy", "pandas", "scipy", "matplotlib", "straplog[plot]>=0.3"]
+# dependencies = ["numpy", "pandas", "scipy", "matplotlib", "straplog[plot]>=0.3.1"]
 # ///
 """
 BaroShift paced-breathing sessions: find them in a StrapLog H10 recording,
@@ -47,7 +47,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 from scipy.signal import welch
 
 import straplog.db as straplog_db

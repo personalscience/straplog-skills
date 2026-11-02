@@ -1,6 +1,6 @@
 {
   "name": "straplog-skills",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Polar H10 HRV analysis for StrapLog exports: workout sessions (zones, DFA α1, drift, HRR), overnight HRV, graded ramp tests (α1 thresholds), daily resting HRV with a longitudinal log, and BaroShift paced-breathing sessions",
   "author": {
     "name": "Richard Sprague",
