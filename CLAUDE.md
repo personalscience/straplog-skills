@@ -1,6 +1,6 @@
 # CLAUDE.md — straplog-skills
 
-Claude Code plugin (`personalscience/straplog-skills`) with five Polar H10 HRV skills for StrapLog exports: `h10` (router), `h10-session`, `hrv-overnight`, `hrv-ramp-test`, `hrv-resting`. Each analysis skill is a `SKILL.md` plus one PEP 723 `uv` script; loading and HRV algorithms come from the `straplog` package on PyPI (`~/dev/straplog-py`).
+Claude Code plugin (`personalscience/straplog-skills`) with six Polar H10 HRV skills for StrapLog exports: `h10` (router), `h10-session`, `hrv-overnight`, `hrv-ramp-test`, `hrv-resting`, `baroshift`. Each analysis skill is a `SKILL.md` plus one PEP 723 `uv` script; loading and HRV algorithms come from the `straplog` package on PyPI (`~/dev/straplog-py`).
 
 ## Commands
 
@@ -8,9 +8,9 @@ Claude Code plugin (`personalscience/straplog-skills`) with five Polar H10 HRV s
 uv run skills/<skill>/scripts/<script>.py --list      # smoke test against the newest export
 uvx ruff check --select F skills/*/scripts/*.py
 claude plugin validate .
-# the install is a cached snapshot; `plugin update` is a no-op without a version bump, so after edits:
-claude plugin uninstall straplog-skills@personalscience && claude plugin install straplog-skills@personalscience
 ```
+
+No reinstall after edits on this machine: the marketplace is a local directory, so the plugin reads this folder live (`claude plugin list` shows `Read from:` here, and the copy under `~/.claude/plugins/cache/` goes unused). Start a new session to pick up a changed `SKILL.md`. An install from GitHub is a cached snapshot, so `plugin update` needs a version bump in both manifests.
 
 ## Rules that the tree does not tell you
 

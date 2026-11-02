@@ -1,14 +1,15 @@
 # StrapLog skills for Claude Code
 
-Five [Claude Code](https://claude.com/claude-code) skills that analyze Polar H10 recordings exported from the StrapLog iOS app (one SQLite file per recording, RR intervals plus markers).
+Six [Claude Code](https://claude.com/claude-code) skills that analyze Polar H10 recordings exported from the StrapLog iOS app (one SQLite file per recording, RR intervals plus markers).
 
 | Skill | Ask Claude… | You get |
 |---|---|---|
 | `h10` | "analyze last night", "this morning's ruck" | picks the export and dispatches to the right skill below |
 | `h10-session` | "analyze this morning's ride" | HR, Karvonen %HRR zones, DFA α1, cardiac drift, per-set peaks and HRR for lifts, optional GPX/FIT overlay |
-| `hrv-overnight` | "how was my HRV last night" | overnight RMSSD/SDNN trajectory in blocks, Bluetooth coverage gaps, reconciliation against Apple Watch sleep staging |
+| `hrv-overnight` | "how was my HRV last night" | overnight RMSSD/SDNN trajectory in blocks, Bluetooth coverage gaps, reconciliation against Apple Watch sleep staging, HR and RMSSD by Watch stage, and an H10-only sleep estimate for nights without Watch data |
 | `hrv-ramp-test` | "analyze my ramp test" | DFA α1 vs HR, AeT/VT1 (α1 = 0.75) and VT2 (α1 = 0.50) crossings, training zones |
 | `hrv-resting` | "log today's resting HRV" | RMSSD, LnRMSSD, SDNN, pNN50, Poincaré plot, and a longitudinal CSV log with a rolling baseline |
+| `baroshift` | "I did a BaroShift cycle" | finds paced-breathing sessions in a recording by R-R spectral lock; pace, lock and HR/RMSSD before and after, with a longitudinal log |
 
 ## Install
 
