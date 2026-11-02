@@ -40,6 +40,8 @@ ${CLAUDE_SKILL_DIR}/scripts/analyze_overnight.py \
   --out ~/Downloads/hrv260726/overnight
 ```
 
+**`summary.json` → `night`** holds the morning-read figures: artifact-cleaned 2-min min HR, min and max RMSSD with their times, limited to the sleep window (Watch onset to final wake, else the markers), plus HR and RMSSD for the 2 min either side of each marker. Check `window_source`: the marker window can run past the real wake, so a wake bout can set its trough (261102: 3.7 ms at 04:09 with markers, 8.0 ms at 21:47 with the Watch).
+
 **`--health auto` fetches the Watch staging itself** from the Health Auto
 Export app's server on the iPhone (endpoint and token in
 `~/.config/straplog/health.toml`, or `HEALTH_AUTO_EXPORT_URL` / `_TOKEN`) and
@@ -59,9 +61,10 @@ JSON *or* `summary.md`, not both, and don't grep the script. The stdout keys:
 |---|---|
 | `coverage_pct`, `gaps` | capture quality (step 3) |
 | `whole_strip` | `mean_hr`, `rmssd`, `ln_rmssd`, `sdnn`, `pnn50`, `ln_rmssd_clean` |
-| `extremes` | raw 2-min `peak_vagal_ln_rmssd`/`_at`, `hr_floor_bpm`/`_at`; the same with `_clean` after the artifact filter; `artifact_beats` |
+| `extremes` | raw 2-min `peak_vagal_ln_rmssd`/`_at`, `hr_floor_bpm`/`_at`; `trough_vagal_ln_rmssd`/`_at` (full windows only); the same with `_clean` after the artifact filter; `artifact_beats` |
 | `sleep` | Watch architecture, `staging_stable`, `rhr_trustworthy`, `hours_after_wake`, RHR, `watch_sdnn` |
 | `awake_reconciliation` | per Watch awake window: H10 mean HR, range, bump vs baseline |
+| `night` | morning-read figures over the sleep window, marker pre/post 2 min (above) |
 | `h10_sleep` | H10-only onset, wake bouts, WASO, TST (`tst_min`, `tst_max_min` if dropouts were sleep), efficiency; always present |
 | `h10_sleep_vs_watch` | with Watch data: Watch vs H10 TST over the same window, epoch agreement, % of Watch wake caught |
 

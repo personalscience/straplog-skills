@@ -192,7 +192,7 @@ def rolling_extremes(rows, gaps_raw) -> dict:
 def _extremes(rows, gaps_raw) -> dict:
     starts = [rows[0][0]] + [g[1] for g in gaps_raw]
     ends = [g[0] for g in gaps_raw] + [rows[-1][0]]
-    best_ln, low_hr = (-9.0, None), (999.0, None)
+    best_ln, low_hr, low_ln = (-9.0, None), (999.0, None), (99.0, None)
     for s, e in zip(starts, ends):
         seg = [(ts, v) for ts, v in rows if s <= ts <= e]
         if len(seg) < 2 or (seg[-1][0] - seg[0][0]) < 300:
@@ -210,13 +210,60 @@ def _extremes(rows, gaps_raw) -> dict:
                     best_ln = (cs["ln_rmssd"], a)
                 if cs["mean_hr"] < low_hr[0]:
                     low_hr = (cs["mean_hr"], a)
+                # A truncated tail can pose as the trough (65 s at 04:09 read
+                # 3.7 ms on 2026-11-02, against 8.0 for the lowest full window).
+                if cs["ln_rmssd"] < low_ln[0] and chunk[-1][0] - a >= 0.9 * ROLL_WIN_SEC:
+                    low_ln = (cs["ln_rmssd"], a)
             i = max(j, i + 1)
     return {
         "peak_vagal_ln_rmssd": round(best_ln[0], 3) if best_ln[1] else None,
         "peak_vagal_at": hm(best_ln[1]) if best_ln[1] else None,
         "hr_floor_bpm": round(low_hr[0], 1) if low_hr[1] else None,
         "hr_floor_at": hm(low_hr[1]) if low_hr[1] else None,
+        "trough_vagal_ln_rmssd": round(low_ln[0], 3) if low_ln[1] else None,
+        "trough_vagal_at": hm(low_ln[1]) if low_ln[1] else None,
     }
+
+
+def _window_hrv(rows) -> dict | None:
+    """HR and RMSSD for one short window, or None if too few beats to trust."""
+    cs = td_stats(gate(rows))
+    if cs.get("n", 0) < MIN_BEATS_ROLL:
+        return None
+    return {"hr": round(cs["mean_hr"], 1), "rmssd": round(cs["rmssd"], 1)}
+
+
+def night_summary(rows, gaps_raw, markers_ts, sleep: dict | None, day0: datetime,
+                  markers: list[dict]) -> dict:
+    """The figures a morning read quotes, artifact-cleaned and limited to the
+    sleep window, so pre-bed and post-wake minutes can't set an extreme: the
+    Watch's onset to final wake when staged, else the lights_out/up markers.
+    Each marker also gets HR and RMSSD for the 2 min before and after it."""
+    onset = (sleep or {}).get("sleep_onset_local")
+    wake = (sleep or {}).get("final_wake_local")
+    if onset and wake:
+        a = (_parse_local(onset) - REF).total_seconds()
+        b = (_parse_local(wake) - REF).total_seconds()
+        source = "watch"
+    else:
+        a, b, has_in, has_out = _marker_window(markers, rows[0][0], rows[-1][0], day0)
+        source = "markers" if has_in and has_out else "strip edges"
+    keep = hrv.artifact_mask([v for _, v in rows])
+    clean = [r for r, k in zip(rows, keep) if k]
+    win = [r for r in clean if a <= r[0] <= b]
+    out = {"window": f"{hm(a)}-{hm(b)}", "window_source": source}
+    stats = td_stats(gate(win))
+    if stats:
+        x = _extremes(win, [g for g in gaps_raw if a <= g[0] and g[1] <= b])
+        for k in ("peak_vagal", "trough_vagal"):
+            ln = x[f"{k}_ln_rmssd"]
+            x[f"{k}_rmssd"] = round(math.exp(ln), 1) if ln is not None else None
+        out |= {"mean_hr": round(stats["mean_hr"], 1), "rmssd": round(stats["rmssd"], 1), **x}
+    out["markers"] = [
+        {**m, "pre_2min": _window_hrv([r for r in clean if t - ROLL_WIN_SEC <= r[0] < t]),
+         "post_2min": _window_hrv([r for r in clean if t <= r[0] < t + ROLL_WIN_SEC])}
+        for m, t in zip(markers, markers_ts)]
+    return out
 
 
 # ---------- Apple Health --------------------------------------------------
@@ -1174,6 +1221,8 @@ def main(argv=None) -> int:
     whole = td_stats(gate(rows))
     start_dt = ts_to_local(rows[0][0])
 
+    events = list(straplog_db.load_events(args.db, pk).itertuples())
+    marker_ts = [float(r.t) for r in events]
     s = {
         "recording_pk": pk,
         "name": rec["name"],
@@ -1191,7 +1240,7 @@ def main(argv=None) -> int:
         "db": str(args.db),
         "end_date": ts_to_local(rows[-1][0]).strftime("%Y-%m-%d"),
         "markers": [{"time": hm(r.t), "note": str(r.note or "").strip()}
-                    for r in straplog_db.load_events(args.db, pk).itertuples()],
+                    for r in events],
     }
 
     wake_est = h10_wake_estimate(rows, s["markers"], start_dt)
@@ -1236,6 +1285,8 @@ def main(argv=None) -> int:
                            f"{label} — RR tachogram")
         except Exception as e:                       # plots are not the point
             s["plot_warning"] = f"{type(e).__name__}: {e}"
+
+    s["night"] = night_summary(rows, gaps_raw, marker_ts, s.get("sleep"), start_dt, s["markers"])
 
     write_summary(s, out_dir / "summary.md")
     (out_dir / "summary.json").write_text(json.dumps(s, indent=2, default=str))
