@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy", "pandas", "scipy", "matplotlib", "straplog[plot]>=0.2"]
+# dependencies = ["numpy", "pandas", "scipy", "matplotlib", "straplog[plot]>=0.3"]
 # ///
 """
 BaroShift paced-breathing sessions: find them in a StrapLog H10 recording,
@@ -16,6 +16,9 @@ that also takes app-only sessions (no H10) and the app's own scores.
 
 How a session is found (window_source):
   manual           --window given
+  pacer            the app's pacer_start/pacer_stop events (StrapLog 1.2+, or
+                   a legacy "6.0/min" note); the stamped rate is the pace band
+                   centre (+-1.5/min). An unstopped pacer ends with the recording.
   markers          a start marker and an end marker bracket it
   detected+end     the spectral scan found a locked run; end markers inside it
                    split it into sessions and set their ends
@@ -38,6 +41,7 @@ import csv
 import json
 import os
 import re
+import sqlite3
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -47,7 +51,7 @@ import pandas as pd
 from scipy.signal import welch
 
 import straplog.db as straplog_db
-from straplog import catalog, hrv
+from straplog import catalog, export, hrv
 
 APPLE_REF = datetime(2001, 1, 1)
 GAP_SEC = 15.0
@@ -63,6 +67,8 @@ PRE_SEC = 300.0
 POST_SEC = 300.0
 POST2_SEC = 600.0      # second post window: end+5 -> end+15 min
 END_SNAP_SEC = 180.0   # an end marker this close after a run ends it
+PACER_BAND_HALF = 1.5  # breaths/min either side of the stamped rate (matches the 4.5-7.5 default at 6/min)
+MIN_PACER_SEC = 60.0   # a spectrum needs a minute
 
 LOG_PATH = Path(os.environ.get(
     "BAROSHIFT_LOG",
@@ -181,35 +187,61 @@ def runs(trace):
     return [(a, b) for a, b in rs if b - a >= MIN_RUN_SEC]
 
 
-def sessions_from(trace, events, windows):
-    """Resolve session windows and how each was found."""
+def pacer_windows(db: Path, pk: int, t_last: float):
+    """Pacer sessions as (start, end, "pacer", info) in Apple-epoch local
+    seconds (the same clock as `load`). A pacer with no stop ends at the
+    recording's last beat; a window is clipped to the recording's beats."""
+    ps = export.pacer_sessions(db, pk)
+    if not ps:
+        return []
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        tz = con.execute("SELECT tz_offset_s FROM recording WHERE id=?", (pk,)).fetchone()[0]
+    finally:
+        con.close()
+    to_apple = lambda ms: ms / 1000.0 + tz - straplog_db.APPLE_EPOCH_OFFSET
+    out = []
+    for p in ps:
+        a = to_apple(p["start_ms"])
+        b = t_last if p["stop_ms"] is None else min(to_apple(p["stop_ms"]), t_last)
+        if b - a >= MIN_PACER_SEC:
+            out.append((a, b, "pacer", {
+                "rate": p["rate"], "inhale_s": p["inhale_s"], "exhale_s": p["exhale_s"],
+                "stopped": p["stop_ms"] is not None}))
+    return out
+
+
+def sessions_from(trace, events, windows, pacer=()):
+    """Resolve session windows and how each was found. Order of authority:
+    manual, pacer, markers, spectral. Marker/spectral windows that overlap a
+    pacer window are dropped; the rest still apply."""
     if windows:
-        return [(a, b, "manual") for a, b in windows]
+        return [(a, b, "manual", None) for a, b in windows]
     starts = [t for t, n in events if START_RX.search(n)]
     ends = [t for t, n in events if END_RX.search(n)]
-    out = []
-    # Marker pairs first: each start with the first end after it.
+    out = list(pacer)
+    # Marker pairs next: each start with the first end after it.
     used = set()
     for s in starts:
         e = next((e for e in ends if e > s and e not in used), None)
-        if e is not None and e - s >= 60:
-            out.append((s, e, "markers"))
+        if e is not None and e - s >= 60 and not any(p[0] < e and p[1] > s for p in pacer):
+            out.append((s, e, "markers", None))
             used.add(e)
     free_ends = [e for e in ends if e not in used]
     for a, b in runs(trace):
-        if any(s < b and e > a for s, e, _ in out):
+        if any(o[0] < b and o[1] > a for o in out):
             continue
         inside = [e for e in free_ends if a <= e <= b + END_SNAP_SEC]
         if not inside:
-            out.append((a, b, "detected"))
+            out.append((a, b, "detected", None))
             continue
         cur = a
         for e in inside:
-            out.append((cur, e, "detected+end"))
+            out.append((cur, e, "detected+end", None))
             cur = e
         if b - cur >= MIN_RUN_SEC:
-            out.append((cur, b, "detected"))
-    return sorted(out)
+            out.append((cur, b, "detected", None))
+    return sorted(out, key=lambda o: o[:2])
 
 
 # ---------- metrics -------------------------------------------------------
@@ -376,7 +408,9 @@ def cmd_analyze(a) -> int:
     band = (a.pace_min / 60.0, a.pace_max / 60.0)
     trace = scan(t, rr, keep, seg, band)
     windows = parse_windows(a.window, local(t[0]))
-    sess = sessions_from(trace, events, windows)
+    pacer = [] if windows else pacer_windows(db, pk, float(t[-1]))
+    sess = sessions_from(trace, events, windows, pacer)
+    traces = {band: trace}   # pacer sessions scan around their own rate
     out = {"db": str(db), "recording_pk": pk, "name": rec["name"],
            "date": local(t[0]).date().isoformat(),
            "pace_band_bpm": [a.pace_min, a.pace_max],
@@ -384,9 +418,19 @@ def cmd_analyze(a) -> int:
            "sessions": []}
     kept = []
     out["rejected"] = []
-    for s0, s1, src in sess:
-        m = session_metrics(t, rr, keep, seg, trace, s0, s1, band)
+    for s0, s1, src, info in sess:
+        sband = band
+        if info:
+            sband = (max(info["rate"] - PACER_BAND_HALF, 2.4) / 60.0,
+                     (info["rate"] + PACER_BAND_HALF) / 60.0)
+            if sband not in traces:
+                traces[sband] = scan(t, rr, keep, seg, sband)
+        m = session_metrics(t, rr, keep, seg, traces[sband], s0, s1, sband)
         m["window_source"] = src
+        if info:
+            m["pacer"] = {"stamped_rate_bpm": info["rate"], "inhale_s": info["inhale_s"],
+                          "exhale_s": info["exhale_s"], "stopped": info["stopped"]}
+            m["pace_band_bpm"] = [round(sband[0] * 60, 1), round(sband[1] * 60, 1)]
         m["date"] = local(s1).date().isoformat()
         # A scan-only run must hold the lock as a whole, not just in patches:
         # REM and pre-wake stretches throw up brief slow peaks.
@@ -400,7 +444,7 @@ def cmd_analyze(a) -> int:
     if a.out:
         a.out.mkdir(parents=True, exist_ok=True)
         png = a.out / f"baroshift_{pk}.png"
-        plot(t, rr, keep, trace, sess, events, png, f"{rec['name']} · BaroShift")
+        plot(t, rr, keep, trace, [s[:3] for s in sess], events, png, f"{rec['name']} · BaroShift")
         out["plot"] = str(png)
         write_md(out | {"_events": events}, a.out / f"baroshift_{pk}.md")
         out["summary_md"] = str(a.out / f"baroshift_{pk}.md")

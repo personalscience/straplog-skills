@@ -1,6 +1,6 @@
 ---
 name: h10
-description: Route a Polar H10 / StrapLog recording to the right HRV skill by its activity — "analyse last night", "this morning's ruck", "my latest H10 recording". Lists exports with the straplog CLI, then dispatches to hrv-overnight, hrv-resting, h10-session or hrv-ramp-test.
+description: Route a Polar H10 / StrapLog recording to the right HRV skill by its activity — "analyse last night", "this morning's ruck", "my latest H10 recording". Lists exports with the straplog CLI, then dispatches to hrv-overnight, hrv-resting, baroshift, h10-session or hrv-ramp-test.
 ---
 
 # H10 router
@@ -31,6 +31,7 @@ Pick the row that matches the request; if two plausibly match, ask. Pass
 | activity | skill | notes |
 |---|---|---|
 | `sleep` | **hrv-overnight**, then **hrv-resting** if `labels` has `resting_start` | One sleep export serves both: overnight for the night, resting for the 5-min morning reading the app marked after the wake time. Report the two separately. |
+| `breathing` | **baroshift** (the pacer windows come from the file's `pacer_start`/`pacer_stop` events), plus **hrv-resting** on the pre and post reading if the file has them | Report the pacer's stamped rate and ratio next to the measured breath rate. Run baroshift only on these windows; don't hunt for sessions by spectrum. |
 | `other` | decide from `name` and `labels` (below) | |
 
 `other` covers exports from before schema v3 (no activity recorded, e.g.

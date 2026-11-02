@@ -1,6 +1,6 @@
 ---
 name: baroshift
-description: BaroShift paced-breathing sessions — find them in a StrapLog H10 recording (overnight or daytime) by R-R spectral lock, measure pace, lock and HR/HRV before→after, and keep a longitudinal log that also takes app-only sessions and the app's scores (from screenshots). Triggers - baroshift, breathwork session, resonance breathing, "I did a BaroShift cycle".
+description: BaroShift paced-breathing sessions — find them in a StrapLog H10 recording (overnight or daytime) by R-R spectral lock, measure pace, lock and HR/HRV before→after, and keep a longitudinal log that also takes app-only sessions and the app's scores (from screenshots). Triggers - baroshift, breathing session, breathwork session, resonance breathing, "I did a BaroShift cycle".
 ---
 
 # BaroShift sessions
@@ -17,10 +17,11 @@ uv run ${CLAUDE_SKILL_DIR}/scripts/baroshift.py analyze --db <export> \
 - `--db` takes a path or a bare export name (iCloud StrapLog folder); the default is the newest export. It works on any recording: an overnight strip, a seated daytime session, or one inside a longer recording.
 - **How windows are found** (`window_source`; always report it):
   - `manual`: `--window HH:MM-HH:MM` (repeatable) overrides everything.
+  - `pacer`: the app's `pacer_start` / `pacer_stop` events (StrapLog 1.2+; an older `6.0/min` note counts as equal halves). The window is exactly what the app paced, so no detection is needed. The stamped rate is the pace band centre (±1.5/min, so 6.0 gives 4.5–7.5) and is reported as `pacer.stamped_rate_bpm` with `inhale_s`/`exhale_s`; compare it with the measured `breath_rate_bpm` (the heart following the pace). A pacer never stopped ends with the recording (`pacer.stopped` false). Pacer beats marker/spectral windows that overlap it; non-overlapping ones still apply. Unlike `detected`, a pacer window is kept whatever its `peak_share`: a low share is the finding, not a reason to drop it.
   - `markers`: a `start …` marker followed by an `end …` marker.
   - `detected+end`: the sliding 3-min spectrum found a locked run, and an `end …` marker inside it (or up to 3 min after it) set the end. Several end markers split one run into sessions.
   - `detected`: scan only. It's kept only if the whole window's on-pace share is ≥ 0.5; weaker runs go in `rejected` (REM throws up brief slow peaks).
-- The pace band defaults to 4.5–7.5 breaths/min (`--pace-min/--pace-max`). Widen it if a program paces outside that.
+- The pace band defaults to 4.5–7.5 breaths/min (`--pace-min/--pace-max`); a `pacer` window uses its own stamped rate instead. Widen the default if a program paces outside it.
 - Parse the stdout JSON; `--out` adds a plot (HR plus the on-pace share trace, sessions shaded, markers drawn) and a summary table. The out dir is scratch: no plots in the vault.
 
 **Metrics per session:** `breath_rate_bpm` (spectral peak × 60) · `peak_share` (power within ±0.015 Hz of the peak ÷ 0.04–0.4 Hz power; how purely the heart followed one rhythm) · `lock_pct` (% of sliding windows locked) · `hr_osc_bpm` (HR swing at the breathing frequency, peak-to-trough) · HR and RMSSD for `pre` (5 min before), `session`, `post` (5 min after) and `post2` (5–15 min after), plus the first and last 2-min HR.
@@ -29,7 +30,8 @@ uv run ${CLAUDE_SKILL_DIR}/scripts/baroshift.py analyze --db <export> \
 - 🛑 RMSSD/SDNN *during* paced breathing are produced by the breathing, so they're not a vagal-tone readout. Compare pre → post and post2.
 - A falling HR after a session is uncontrolled. HR also falls after any wake bout or after sitting down, so state the confound and the n. Label every effect "hypothesis, not finding" until there are matched sessions with and without the device.
 - Overnight, `pre` often contains the wake bout that prompted the session; say so.
-- Mark `start BaroShift` / `end BaroShift` when you can. Detected starts are accurate to about ±30 s.
+- With the StrapLog pacer there is nothing to mark. For an external device (BaroShift) mark `start BaroShift` / `end BaroShift` when you can; detected starts are accurate to about ±30 s.
+- Needs `straplog>=0.3` (`export.pacer_sessions`).
 
 ## 2. App-only sessions and app scores
 
@@ -45,4 +47,4 @@ uv run ${CLAUDE_SKILL_DIR}/scripts/baroshift.py log --date 2026-10-30 --end 02:1
 ## 3. Filing
 
 - Vault: the CSV row is the record. Mention the session in that day's note: the night note `SleepHRV-YYMMDD` for overnight sessions, or the session note.
-- `events.csv`: one `other` row per BaroShift occasion (the vocabulary has no breathwork type).
+- `events.csv`: one `breathwork` row per BaroShift or breathing occasion (older rows used `other`).

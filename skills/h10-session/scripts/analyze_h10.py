@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["numpy", "pandas", "fitparse", "straplog[plot]>=0.2"]
+# dependencies = ["numpy", "pandas", "fitparse", "straplog[plot]>=0.3"]
 # ///
 """
 Generic Polar H10 session analyzer for StrapLog SQLite exports.
